@@ -233,7 +233,7 @@
           Cesium.Cartesian3.fromDegrees(lon, lat, z)
         );
         const texInfo = showTex && face.id &&
-          (uvmap?.[face.id] || embeddedTex[face.id]);
+          (embeddedTex[face.id] || uvmap?.[face.id]);
         const entity = viewer.entities.add({
           name: `${label}_f${i}`,
           polygon: {
@@ -284,21 +284,32 @@
     }
 
     // ---- データ読み込み ----
-    function decodeFragment() {
+    async function decodeFragment() {
       const hash = window.location.hash.slice(1);
       if (!hash) return null;
       try {
-        const b64  = hash.replace(/-/g, '+').replace(/_/g, '/');
-        const json = decodeURIComponent(escape(atob(b64)));
-        return JSON.parse(json);
+        const b64   = hash.replace(/-/g, '+').replace(/_/g, '/');
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        let jsonStr;
+        // gzip マジックバイト(1f 8b)なら解凍、なければ平文（後方互換）
+        if (bytes[0] === 0x1f && bytes[1] === 0x8b &&
+            typeof DecompressionStream !== 'undefined') {
+          const stream = new Blob([bytes]).stream()
+            .pipeThrough(new DecompressionStream('gzip'));
+          const buf = await new Response(stream).arrayBuffer();
+          jsonStr = new TextDecoder('utf-8').decode(buf);
+        } else {
+          jsonStr = new TextDecoder('utf-8').decode(bytes);
+        }
+        return JSON.parse(jsonStr);
       } catch (e) {
         console.error('Fragment decode error:', e);
         return null;
       }
     }
 
-    function loadBuildings() {
-      const raw = decodeFragment();
+    async function loadBuildings() {
+      const raw = await decodeFragment();
       if (!raw) {
         document.getElementById('info').textContent = 'URLフラグメントに建物データがありません';
         return;
@@ -331,7 +342,14 @@
 
       const oldH = buildingData.old ? `${buildingData.old.height}m` : 'なし';
       const newH = buildingData.new ? `${buildingData.new.height}m` : 'なし';
-      document.getElementById('info').textContent = `旧: ${oldH} → 新: ${newH}`;
+      let info = `旧: ${oldH} → 新: ${newH}`;
+      // テクスチャがURL長制限で省略された場合はその旨を告知
+      if (buildingData.texNote === 'none') {
+        info += '　⚠ テクスチャはURL長制限のため省略（形状のみ）';
+      } else if (buildingData.texNote === 'new-only') {
+        info += '　⚠ 旧建物のテクスチャはURL長制限のため省略（新のみ表示）';
+      }
+      document.getElementById('info').textContent = info;
     }
 
     viewer.scene.globe.enableLighting = false;
