@@ -1,5 +1,6 @@
 # Copyright (c) 2026 taitobldg@gmail.com
-# 静的サイト(6万ファイル規模)を GitHub Actions 方式で Pages にデプロイする。
+# index.html のみを Pages に配信する（テクスチャ画像は jsDelivr で直接配信するため
+# ビルド対象に含めない）。これにより大量ファイルでも Pages が高速・確実にデプロイできる。
 name: Deploy Pages
 on:
   push:
@@ -20,9 +21,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: index.html
+          sparse-checkout-cone-mode: false
+      - name: Stage minimal site (index.html のみ)
+        run: |
+          mkdir -p _site
+          cp index.html _site/
+          touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

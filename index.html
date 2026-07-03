@@ -139,9 +139,13 @@
       return c.toDataURL('image/jpeg');
     }
 
-    // テクスチャ画像をキャッシュしてコールバックで返す（filename or full URL）
+    // テクスチャ画像のベースURL。画像は Pages ビルドに含めず、公開リポから
+    // jsDelivr(CDN)経由で直接読み込む（大量ファイルを Pages に載せないため）。
+    const IMAGE_BASE = 'https://cdn.jsdelivr.net/gh/taitobldg/taito-citygml-viewer@main/appearance';
+
+    // テクスチャ画像をキャッシュしてコールバックで返す（相対パス or 完全URL）
     function _loadTex(imgRef, cb) {
-      const url = imgRef.startsWith('http') ? imgRef : `./appearance/${imgRef}`;
+      const url = imgRef.startsWith('http') ? imgRef : `${IMAGE_BASE}/${imgRef}`;
       if (texCache[url]) { cb(texCache[url]); return; }
       const img = new Image();
       img.crossOrigin = 'anonymous';
