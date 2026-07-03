@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<!-- Copyright (c) 2026 taitobldg@gmail.com -->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>建物変更プレビュー — Cesium</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer {
+      width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #000;
+    }
+    #toolbar {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    }
+    .sep { width: 1px; height: 24px; background: rgba(255,255,255,0.25); margin: 0 2px; }
+    .btn {
+      padding: 6px 14px; border: none; border-radius: 4px;
+      cursor: pointer; font-size: 13px; font-weight: bold;
+    }
+    .btn-old   { background: #ff6b6b; color: #fff; }
+    .btn-new   { background: #4fc3f7; color: #000; }
+    .btn-layer { background: rgba(0,0,0,0.65); color: #fff; border: 1px solid rgba(255,255,255,0.35); }
+    .btn-lod   { background: rgba(30,30,30,0.75); color: #ccc; border: 1px solid rgba(255,255,255,0.25); }
+    .btn-lod.active { background: #ffd54f; color: #000; border-color: #ffd54f; }
+    .btn.inactive { opacity: 0.35; }
+    #info {
+      position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.72); color: #fff;
+      padding: 8px 16px; border-radius: 6px; font-size: 12px;
+      max-width: 90vw; text-align: center; white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="toolbar">
+    <button id="btnOld"   class="btn btn-old"            onclick="toggleOld()">旧建物</button>
+    <button id="btnNew"   class="btn btn-new"            onclick="toggleNew()">新建物</button>
+    <div class="sep"></div>
+    <button id="btnLod0"  class="btn btn-lod active"     onclick="setLod('lod0')">LOD0</button>
+    <button id="btnLod1"  class="btn btn-lod"            onclick="setLod('lod1')">LOD1</button>
+    <button id="btnLod2"  class="btn btn-lod"            onclick="setLod('lod2')">LOD2</button>
+    <button id="btnTex"   class="btn btn-lod"            onclick="toggleTex()">テクスチャ</button>
+    <div class="sep"></div>
+    <button id="btnPhoto" class="btn btn-layer"          onclick="setLayer('photo')">航空写真</button>
+    <button id="btnStd"   class="btn btn-layer inactive" onclick="setLayer('std')">標準地図</button>
+  </div>
+  <div id="info">建物データを読み込み中...</div>
+
+  <script>
+    Cesium.Ion.defaultAccessToken = '';
+
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+      baseLayerPicker: false, geocoder: false, homeButton: false,
+      sceneModePicker: false, navigationHelpButton: false,
+      animation: false, timeline: false, fullscreenButton: true,
+      vrButton: false, imageryProvider: false,
+      creditContainer: document.createElement('div'),
+    });
+
+    // 地理院タイル
+    const gsiPhoto = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+      maximumLevel: 18, credit: '地理院タイル',
+    });
+    const gsiStd = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png',
+      maximumLevel: 18, credit: '地理院タイル',
+    });
+    let photoLayer = viewer.imageryLayers.addImageryProvider(gsiPhoto);
+    let stdLayer   = viewer.imageryLayers.addImageryProvider(gsiStd);
+    stdLayer.show  = false;
+
+    function setLayer(name) {
+      const isPhoto = name === 'photo';
+      photoLayer.show = isPhoto; stdLayer.show = !isPhoto;
+      document.getElementById('btnPhoto').classList.toggle('inactive', !isPhoto);
+      document.getElementById('btnStd').classList.toggle('inactive', isPhoto);
+    }
+
+    // ---- 状態 ----
+    let buildingData = null;
+    let oldEntities = [], newEntities = [];
+    let showOld = true, showNew = true;
+    let currentLod = 'lod0';
+    let showTex = false;
+    const texCache = {};  // filename → HTMLImageElement
+    let uvmap = null;     // poly_id → {img, uv}  (./appearance/uvmap.json)
+
+    function toggleOld() {
+      showOld = !showOld;
+      oldEntities.forEach(e => e.show = showOld);
+      document.getElementById('btnOld').classList.toggle('inactive', !showOld);
+    }
+    function toggleNew() {
+      showNew = !showNew;
+      newEntities.forEach(e => e.show = showNew);
+      document.getElementById('btnNew').classList.toggle('inactive', !showNew);
+    }
+    function setLod(lod) {
+      currentLod = lod;
+      ['lod0', 'lod1', 'lod2'].forEach(l =>
+        document.getElementById('btnLod' + l.slice(-1)).classList.toggle('active', l === lod)
+      );
+      renderAll();
+    }
+    function toggleTex() {
+      showTex = !showTex;
+      document.getElementById('btnTex').classList.toggle('active', showTex);
+      if (currentLod !== 'lod2') { setLod('lod2'); return; }
+      if (showTex && !uvmap) {
+        fetch('./appearance/uvmap.json')
+          .then(r => r.json())
+          .then(data => { uvmap = data; renderAll(); })
+          .catch(() => { renderAll(); });
+        return;
+      }
+      renderAll();
+    }
+
+    // UV領域をcanvasに切り抜いてdataURLを返す
+    function _cropUV(img, uvs) {
+      const us = uvs.map(p => p[0]), vs = uvs.map(p => p[1]);
+      const u0 = Math.min(...us), u1 = Math.max(...us);
+      const v0 = Math.min(...vs), v1 = Math.max(...vs);
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      // CityGML UV原点は左下・Y軸反転
+      const sx = Math.round(u0 * iw);
+      const sy = Math.round((1 - v1) * ih);
+      const sw = Math.max(1, Math.round((u1 - u0) * iw));
+      const sh = Math.max(1, Math.round((v1 - v0) * ih));
+      const c = document.createElement('canvas');
+      c.width = sw; c.height = sh;
+      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      return c.toDataURL('image/jpeg');
+    }
+
+    // テクスチャ画像をキャッシュしてコールバックで返す（filename or full URL）
+    function _loadTex(imgRef, cb) {
+      const url = imgRef.startsWith('http') ? imgRef : `./appearance/${imgRef}`;
+      if (texCache[url]) { cb(texCache[url]); return; }
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { texCache[url] = img; cb(img); };
+      img.onerror = () => cb(null);
+      img.src = url;
+    }
+
+    // ---- レンダリング ----
+    function clearEntities() {
+      [...oldEntities, ...newEntities].forEach(e => viewer.entities.remove(e));
+      oldEntities = []; newEntities = [];
+    }
+
+    function renderAll() {
+      clearEntities();
+      if (!buildingData) return;
+      if (buildingData.old) {
+        oldEntities = buildBuilding(buildingData.old, '#ff6b6b', '旧');
+        if (!showOld) oldEntities.forEach(e => e.show = false);
+      }
+      if (buildingData.new) {
+        newEntities = buildBuilding(buildingData.new, '#4fc3f7', '新');
+        if (!showNew) newEntities.forEach(e => e.show = false);
+      }
+    }
+
+    function buildBuilding(bldg, colorHex, label) {
+      if (currentLod === 'lod2' && bldg.lod2 && bldg.lod2.length > 0) {
+        return buildLod2(bldg, colorHex, label);
+      }
+      const h = (currentLod === 'lod1' && bldg.lod1top != null)
+                ? bldg.lod1top - bldg.base
+                : bldg.height;
+      return [buildExtrude(bldg, colorHex, label, h)];
+    }
+
+    // LOD0 / LOD1: 押し出し形状
+    function buildExtrude(bldg, colorHex, label, effectiveHeight) {
+      const positions = bldg.coords.map(([lat, lon]) =>
+        Cesium.Cartesian3.fromDegrees(lon, lat, bldg.base)
+      );
+      const lats = bldg.coords.map(c => c[0]);
+      const lons = bldg.coords.map(c => c[1]);
+      const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+      const midLon = (Math.min(...lons) + Math.max(...lons)) / 2;
+      const color  = Cesium.Color.fromCssColorString(colorHex);
+      return viewer.entities.add({
+        name: label,
+        position: Cesium.Cartesian3.fromDegrees(midLon, midLat, bldg.base + effectiveHeight + 30),
+        polygon: {
+          hierarchy: new Cesium.PolygonHierarchy(positions),
+          extrudedHeight: bldg.base + effectiveHeight,
+          height: bldg.base,
+          material: color.withAlpha(0.65),
+          outline: true,
+          outlineColor: Cesium.Color.WHITE.withAlpha(0.9),
+          outlineWidth: 2,
+        },
+        label: {
+          text: `${label} (${currentLod.toUpperCase()})\n${effectiveHeight.toFixed(1)}m`,
+          font: '13px sans-serif',
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -10),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+    }
+
+    // LOD2: 各面ポリゴンを個別レンダリング（テクスチャ対応）
+    function buildLod2(bldg, colorHex, label) {
+      const color   = Cesium.Color.fromCssColorString(colorHex);
+      const outline = Cesium.Color.WHITE.withAlpha(0.85);
+      const entities = [];
+
+      // 新形式 [{id, pts}] / 旧形式 [[lon,lat,z]] 両対応
+      const faces = bldg.lod2.map(f =>
+        Array.isArray(f) ? { id: '', pts: f } : f
+      );
+      // bldg.tex（旧URL形式）またはuvmap.json（新形式）どちらも参照
+      const embeddedTex = bldg.tex || {};
+
+      faces.forEach((face, i) => {
+        const positions = face.pts.map(([lon, lat, z]) =>
+          Cesium.Cartesian3.fromDegrees(lon, lat, z)
+        );
+        const texInfo = showTex && face.id &&
+          (uvmap?.[face.id] || embeddedTex[face.id]);
+        const entity = viewer.entities.add({
+          name: `${label}_f${i}`,
+          polygon: {
+            hierarchy: new Cesium.PolygonHierarchy(positions),
+            perPositionHeight: true,
+            material: color.withAlpha(0.65),
+            outline: true,
+            outlineColor: outline,
+            outlineWidth: 1,
+          },
+        });
+        entities.push(entity);
+
+        // テクスチャ有効時：UV領域でcanvasクロップして上書き
+        if (texInfo) {
+          _loadTex(texInfo.img, img => {
+            if (!img) return;
+            const dataUrl = _cropUV(img, texInfo.uv);
+            entity.polygon.material = new Cesium.ImageMaterialProperty({
+              image: dataUrl, transparent: false,
+            });
+          });
+        }
+      });
+
+      // ラベル：最高点の近くに配置
+      const allPts = faces.flatMap(f => f.pts);
+      const topZ   = Math.max(...allPts.map(pt => pt[2]));
+      const cLon   = (Math.min(...allPts.map(p => p[0])) + Math.max(...allPts.map(p => p[0]))) / 2;
+      const cLat   = (Math.min(...allPts.map(p => p[1])) + Math.max(...allPts.map(p => p[1]))) / 2;
+      const dispH  = (topZ - bldg.base).toFixed(1);
+      entities.push(viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(cLon, cLat, topZ + 20),
+        label: {
+          text: `${label} (LOD2)\n${dispH}m`,
+          font: '13px sans-serif',
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -10),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      }));
+
+      return entities;
+    }
+
+    // ---- データ読み込み ----
+    function decodeFragment() {
+      const hash = window.location.hash.slice(1);
+      if (!hash) return null;
+      try {
+        const b64  = hash.replace(/-/g, '+').replace(/_/g, '/');
+        const json = decodeURIComponent(escape(atob(b64)));
+        return JSON.parse(json);
+      } catch (e) {
+        console.error('Fragment decode error:', e);
+        return null;
+      }
+    }
+
+    function loadBuildings() {
+      const raw = decodeFragment();
+      if (!raw) {
+        document.getElementById('info').textContent = 'URLフラグメントに建物データがありません';
+        return;
+      }
+      // 配列（複数変更）の場合は最初の1件のみ表示
+      buildingData = Array.isArray(raw) ? raw[0] : raw;
+
+      // LOD2データがない場合はボタンを無効化
+      const hasLod2 = buildingData.old?.lod2?.length > 0 || buildingData.new?.lod2?.length > 0;
+      const btnLod2 = document.getElementById('btnLod2');
+      btnLod2.disabled = !hasLod2;
+      if (!hasLod2) btnLod2.style.opacity = '0.3';
+
+      // LOD2がなければテクスチャボタンも無効化
+      const btnTex = document.getElementById('btnTex');
+      btnTex.disabled = !hasLod2;
+      if (!hasLod2) btnTex.style.opacity = '0.3';
+
+      renderAll();
+
+      const maxH = Math.max(buildingData.old?.height ?? 0, buildingData.new?.height ?? 0);
+      viewer.flyTo(viewer.entities, {
+        offset: new Cesium.HeadingPitchRange(
+          Cesium.Math.toRadians(30),
+          Cesium.Math.toRadians(-25),
+          maxH * 6 + 400,
+        ),
+        duration: 1.5,
+      });
+
+      const oldH = buildingData.old ? `${buildingData.old.height}m` : 'なし';
+      const newH = buildingData.new ? `${buildingData.new.height}m` : 'なし';
+      document.getElementById('info').textContent = `旧: ${oldH} → 新: ${newH}`;
+    }
+
+    viewer.scene.globe.enableLighting = false;
+    loadBuildings();
+  </script>
+</body>
+</html>
